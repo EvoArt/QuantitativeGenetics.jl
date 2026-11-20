@@ -1,0 +1,519 @@
+---
+title: "QuantitativeGenetics.jl: algorithms, optimisations, and why it is fast"
+subtitle: "An ASReml-class AI-REML animal model in ~1800 lines of stdlib Julia"
+author: "Arthur Newbury"
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: false
+    theme: cosmo
+    fig-width: 7
+bibliography: references.bib
+---
+
+## The problem
+
+The animal model is the workhorse of quantitative genetics [@henderson1984]:
+
+$$
+\mathbf{y} = \mathbf{X}\boldsymbol{\beta} + \sum_i \mathbf{Z}_i\mathbf{u}_i + \mathbf{e},
+\qquad
+\mathbf{u}_i \sim N(\mathbf{0}, \sigma^2_i \mathbf{K}_i),
+\qquad
+\mathbf{e} \sim N(\mathbf{0}, \sigma^2_e \mathbf{I})
+$$
+
+where $\mathbf{K}_i$ is a relatedness matrix — the pedigree numerator
+relationship matrix $\mathbf{A}$, a genomic relationship matrix $\mathbf{G}$, or
+the identity for i.i.d. effects such as permanent environment. The task is to
+estimate the variance components $\sigma^2_i, \sigma^2_e$ by restricted maximum
+likelihood [@pattersonthompson1971], and to predict $\hat{\mathbf{u}}$ (BLUP) and
+$\hat{\boldsymbol{\beta}}$ (BLUE).
+
+Writing $\mathbf{V} = \sum_i \sigma^2_i \mathbf{Z}_i\mathbf{K}_i\mathbf{Z}_i' + \sigma^2_e\mathbf{I}$,
+the restricted log-likelihood is
+
+$$
+-2\log L = \log|\mathbf{V}| + \log|\mathbf{X}'\mathbf{V}^{-1}\mathbf{X}| + \mathbf{y}'\mathbf{P}\mathbf{y},
+\qquad
+\mathbf{P} = \mathbf{V}^{-1} - \mathbf{V}^{-1}\mathbf{X}(\mathbf{X}'\mathbf{V}^{-1}\mathbf{X})^{-1}\mathbf{X}'\mathbf{V}^{-1}.
+$$
+
+Taken literally this is hopeless: $\mathbf{V}$ is $n \times n$ and dense, and it
+changes at every iteration. Every fast implementation avoids forming it. What
+follows is how, and where the remaining time actually goes.
+
+---
+
+## Never form $\mathbf{A}$; never invert it
+
+### Henderson's rules
+
+The single most important structural fact is that while $\mathbf{A}$ is dense,
+$\mathbf{A}^{-1}$ is *sparse*, and can be written down directly from the pedigree
+without ever forming $\mathbf{A}$ [@henderson1976; @quaas1976].
+
+Decompose $\mathbf{A} = (\mathbf{I}-\mathbf{P})^{-1}\mathbf{D}(\mathbf{I}-\mathbf{P})^{-\top}$,
+where $\mathbf{P}$ holds $\tfrac12$ in the (animal, parent) cells and
+$\mathbf{D} = \mathrm{diag}(d_i)$ collects the Mendelian sampling variances
+
+$$
+d_i = \begin{cases}
+\tfrac12 - \tfrac14(F_s + F_d) & \text{both parents known}\\
+\tfrac34 - \tfrac14 F_p & \text{one parent known}\\
+1 & \text{neither known.}
+\end{cases}
+$$
+
+Then $\mathbf{A}^{-1} = (\mathbf{I}-\mathbf{P})^\top\mathbf{D}^{-1}(\mathbf{I}-\mathbf{P})$,
+which is a handful of contributions per animal:
+
+```julia
+for i in 1:q
+    s, t = sire[i], dam[i]
+    di = 1.0 / d[i]
+    C[i,i] += di
+    if s != 0
+        C[i,s] -= di/2;  C[s,i] -= di/2;  C[s,s] += di/4
+    end
+    if t != 0
+        C[i,t] -= di/2;  C[t,i] -= di/2;  C[t,t] += di/4
+    end
+    if s != 0 && t != 0
+        C[s,t] += di/4;  C[t,s] += di/4
+    end
+end
+```
+
+This is $O(q)$ work producing $O(q)$ nonzeros. How much this matters is worth
+seeing numerically — measured on real pedigrees:
+
+| animals | nonzeros in $\mathbf{A}$ | nonzeros in $\mathbf{A}^{-1}$ |
+|--------:|--------:|--------:|
+|   300 | 91.5% | 1.61% |
+|   600 | 90.9% | 0.81% |
+| 1,200 | 90.6% | 0.40% |
+
+$\mathbf{A}$ is ~91% dense and stays that way. $\mathbf{A}^{-1}$ is under 1% and
+gets *sparser* as the pedigree grows. **This single asymmetry is the main reason
+this package is two orders of magnitude faster than the R alternatives**, and we
+return to it in @sec-why.
+
+### $\log|\mathbf{A}|$ comes free
+
+Because $\mathbf{P}$ is strictly lower triangular in a topologically sorted
+pedigree, $|\mathbf{I}-\mathbf{P}| = 1$, so $|\mathbf{A}| = |\mathbf{D}|$ and
+
+$$
+\log|\mathbf{A}| = \sum_i \log d_i .
+$$
+
+REML needs this every iteration; it costs one pass over a cached vector and no
+linear algebra at all. This is why `Pedigree` retains `d` rather than folding
+$1/d_i$ into the assembly and discarding it.
+
+### Inbreeding: Meuwissen & Luo
+
+The $d_i$ need inbreeding coefficients, and $F_i = \tfrac12 a(s_i, d_i)$ — a
+single off-diagonal entry of $\mathbf{A}$. The obvious recursive tabular rule
+with memoisation works but allocates a growing hash table and recurses to
+pedigree depth. @meuwissenluo1992 instead walk each animal's ancestor set once,
+accumulating each ancestor's contribution $L_j$ to the animal's two gametes, and
+recovering $F_i = \sum_j L_j^2 d_j - 1$.
+
+The crucial detail is that ancestors are processed in **decreasing index order**.
+Because the pedigree is topologically sorted, popping the largest pending index
+guarantees every contribution to a node has arrived before that node is expanded:
+
+```julia
+while nanc > 0
+    best = argmax over the pending list          # largest index
+    j = anc[best];  nanc -= 1
+    Fi += L[j]^2 * d[j]
+    half = 0.5 * L[j]
+    for parent in (sire[j], dam[j])
+        parent == 0 && continue
+        push parent onto the list if absent
+        L[parent] += half
+    end
+end
+F[i] = Fi - 1.0
+```
+
+Work vectors are allocated once and cleared only over the ancestors actually
+touched, so per-animal cost is proportional to ancestor-set size, not $q$.
+
+Measured against the recursive-`Dict` approach (both give *identical* answers):
+
+| animals | recursive Dict | Meuwissen & Luo | speedup |
+|--------:|---------------:|----------------:|--------:|
+|  2,000 | 0.015 s | 0.0020 s |  7.7× |
+|  5,000 | 0.071 s | 0.0082 s |  8.7× |
+| 10,000 | 0.214 s | 0.0186 s | 11.5× |
+
+**Also used by:** every serious animal-breeding package. `nadiv` [@nadiv] in R,
+BLUPF90 [@blupf90], ASReml [@asreml], and MTDFREML all build $\mathbf{A}^{-1}$
+this way. This part of the algorithm is not where implementations differ.
+
+---
+
+## Henderson's mixed model equations
+
+Rather than working with $\mathbf{V}$, solve the MME [@henderson1950] with
+$\lambda_i = \sigma^2_e/\sigma^2_i$:
+
+$$
+\mathbf{C} =
+\begin{bmatrix}
+\mathbf{X}'\mathbf{X} & \mathbf{X}'\mathbf{Z}_1 & \cdots\\
+\mathbf{Z}_1'\mathbf{X} & \mathbf{Z}_1'\mathbf{Z}_1 + \mathbf{K}_1^{-1}\lambda_1 & \cdots\\
+\vdots & & \ddots
+\end{bmatrix},
+\qquad
+\mathbf{r} = \begin{bmatrix}\mathbf{X}'\mathbf{y}\\ \mathbf{Z}_1'\mathbf{y}\\ \vdots\end{bmatrix}.
+$$
+
+$\mathbf{C}$ is sparse whenever the $\mathbf{K}_i^{-1}$ are, and the identity
+
+$$
+\log|\mathbf{V}| + \log|\mathbf{X}'\mathbf{V}^{-1}\mathbf{X}|
+= \log|\mathbf{C}| - m\log\sigma^2_e + n\log\sigma^2_e + \sum_i\!\big(q_i\log\sigma^2_i + \log|\mathbf{K}_i|\big)
+$$
+
+($m = p + \sum q_i$) turns the whole objective into quantities one sparse
+Cholesky already provides. The residual quadratic form likewise falls out of the
+solution vector:
+
+$$
+\mathbf{y}'\mathbf{P}\mathbf{y} = \big(\mathbf{y}'\mathbf{y} - \hat{\mathbf{s}}'\mathbf{r}\big)/\sigma^2_e .
+$$
+
+::: {.callout-warning}
+## The $-m\log\sigma^2_e$ term is easy to lose
+$\mathbf{C}$ is built in $\lambda$-scaling, so recovering $\log|\mathbf{V}|$ means
+putting back one $\sigma^2_e$ per row of $\mathbf{C}$ — all $m$ of them. Omitting
+it is exact **only where $\sigma^2_u = \sigma^2_e$**, so a single test at
+$\theta = (1,1)$ passes while every other point is wrong. This cost me an
+afternoon; it is now checked at four separate $\theta$ against a brute-force
+dense-$\mathbf{V}$ reference.
+:::
+
+---
+
+## AI-REML
+
+### The average information trick
+
+Newton–Raphson on the REML likelihood needs the Hessian, whose terms involve
+$\mathrm{tr}(\mathbf{P}\,\partial\mathbf{V}/\partial\theta_i\,\mathbf{P}\,\partial\mathbf{V}/\partial\theta_j)$
+— extremely expensive. Fisher scoring needs the expected information, also
+expensive. @gilmour1995 observed that the *average* of the observed and expected
+information has all the trace terms cancel, leaving
+
+$$
+\mathrm{AI}_{ij} = \tfrac12\, \mathbf{f}_i'\,\mathbf{P}\,\mathbf{f}_j,
+\qquad
+\mathbf{f}_i = \frac{\partial\mathbf{V}}{\partial\theta_i}\mathbf{P}\mathbf{y}.
+$$
+
+For a random effect $\partial\mathbf{V}/\partial\sigma^2_i = \mathbf{Z}_i\mathbf{K}_i\mathbf{Z}_i'$
+and the MME give $\hat{\mathbf{u}}_i = \sigma^2_i\mathbf{K}_i\mathbf{Z}_i'\mathbf{P}\mathbf{y}$,
+so $\mathbf{f}_i = \mathbf{Z}_i\hat{\mathbf{u}}_i/\sigma^2_i$ — already available.
+Each $\mathbf{P}\mathbf{f}_i$ comes from absorbing $\mathbf{f}_i$ as a
+pseudo-observation, i.e. **a solve against the factor we already have**:
+
+```julia
+mul!(rw.RHS, transpose(rw.Wmat), rw.F)   # W'f for all k+1 variates at once
+A = F \ rw.RHS                           # ONE multi-RHS CHOLMOD solve
+mul!(rw.PF, rw.Wmat, A)
+@inbounds for c in 1:(k+1), t in 1:n
+    rw.PF[t,c] = (rw.F[t,c] - rw.PF[t,c]) / σ²ₑ
+end
+```
+
+So the entire second-order information costs $k{+}1$ triangular solves and **no
+traces**. This is the identity that makes AI-REML fast, and it is exactly what an
+autodiff system cannot discover — AD would differentiate the factorisation
+instead, which is strictly more work.
+
+::: {.callout-warning}
+## The $1/\sigma^2_i$ scaling is not optional
+Using $\mathbf{f}_i = \mathbf{Z}_i\hat{\mathbf{u}}_i$ without dividing by
+$\sigma^2_i$ yields an AI matrix that is symmetric, positive definite, and the
+right order of magnitude — but wrong by factors of $\sigma^2_i\sigma^2_j$. The
+resulting steps *increase* $-2\log L$. Verified against
+$\tfrac12\mathbf{y}'\mathbf{P}\frac{\partial\mathbf{V}}{\partial\theta_i}\mathbf{P}\frac{\partial\mathbf{V}}{\partial\theta_j}\mathbf{P}\mathbf{y}$.
+:::
+
+Two further practical points. AI approximates *half* the Hessian of $-2\log L$,
+so the step is $-(2\,\mathrm{AI})^{-1}\mathbf{g}$; dropping the 2 turns quadratic
+convergence into a 50-iteration crawl. And the iteration runs on the **log
+scale**, so variances stay positive for any step length, with step halving and an
+EM fallback [@dempster1977] when AI proposes a non-improving direction — EM is
+slower but monotone and cannot leave the parameter space. This hybrid is what
+ASReml does, and it is why real data does not break it.
+
+**Also used by:** ASReml [@asreml], BLUPF90's `airemlf90` [@blupf90], `sommer`
+[@sommer], and `breedR`. The algorithm is standard; the implementation is where
+the time goes.
+
+### The one hard term: traces via selected inversion
+
+The *score* is not so lucky. It needs
+$\mathrm{tr}(\mathbf{K}_i^{-1}\mathbf{C}^{u_iu_i})$ — elements of
+$\mathbf{C}^{-1}$ at the positions where $\mathbf{K}_i^{-1}$ is nonzero. Forming
+$\mathbf{C}^{-1}$ is out of the question.
+
+The Takahashi equations [@takahashi1973] compute exactly the entries of
+$\mathbf{C}^{-1}$ *on the sparsity pattern of the factor*, from the factor, in one
+backward sweep. With $\mathbf{C} = \mathbf{L}\mathbf{D}\mathbf{L}'$ and
+$\mathbf{Z} = \mathbf{C}^{-1}$:
+
+$$
+Z_{ij} = -\!\!\sum_{k>j,\,L_{kj}\neq 0}\!\! L_{kj}Z_{ki} \quad (i>j),
+\qquad
+Z_{jj} = \frac{1}{D_j} - \!\!\sum_{k>j}\!\! L_{kj}Z_{kj}.
+$$
+
+Sweeping columns from $n$ down to 1, every right-hand-side entry is already
+known. Crucially, fill-in gives
+$\mathrm{pattern}(\mathbf{K}_i^{-1}) \subseteq \mathrm{pattern}(\mathbf{C}) \subseteq \mathrm{pattern}(\mathbf{L}+\mathbf{L}')$,
+so every entry the trace asks for is available. This is what FSPAK
+[@perezenciso1994] computes inside BLUPF90.
+
+::: {.callout-important}
+## A fast rewrite that was subtly wrong
+Restricting $k$ to column $j$'s stored pattern is correct. A scatter-based
+reformulation that walks only the *source* column ran **8× faster and was wrong
+by 4e-5** — it silently drops the transposed $r<k$ contributions. An error that
+size still looks like a converged fit. It was caught only by checking every
+computed entry against `inv(Matrix(C))`, which is now a permanent test.
+:::
+
+For large pedigrees the exact sweep becomes the bottleneck, so Hutchinson
+probing [@hutchinson1990] is available: $E[\mathbf{v}'\mathbf{B}\mathbf{C}^{-1}\mathbf{v}] = \mathrm{tr}(\mathbf{B}\mathbf{C}^{-1})$
+for Rademacher $\mathbf{v}$, each probe one solve against the cached factor.
+Measured at $q = 5000$: **43.1 s exact versus 1.03 s with 50 probes**, agreeing
+to three decimals. `trace_method = :auto` switches on $\mathrm{nnz}(\mathbf{L}) > 150{,}000$.
+This mirrors BLUPF90's Monte-Carlo AI-REML option [@matilainen2013].
+
+---
+
+## Implementation optimisations
+
+### Assemble by scatter-add, not sparse arithmetic
+
+Across an entire fit, only the scalars $\lambda_i$ change. So build
+$\mathbf{C}$'s pattern once, cache the $\theta$-independent values, and cache the
+linear indices into `C.nzval` where each $\mathbf{K}_i^{-1}$ entry lands:
+
+```julia
+function update_mme!(ws::MMEWorkspace, λ)
+    nzv = nonzeros(ws.C)
+    copyto!(nzv, ws.base_nzval)          # X'X, X'Zᵢ, Zᵢ'Zⱼ — never change
+    @inbounds for i in eachindex(ws.effects)
+        λi, idx, val = λ[i], ws.kidx[i], ws.kval[i]
+        @simd for t in eachindex(idx)
+            nzv[idx[t]] += λi * val[t]   # scatter-add
+        end
+    end
+end
+```
+
+**Zero allocations, 0.034 ms at $q=5000$.** The obvious alternative,
+`ZtZ ./ σ²ₑ .+ Kinv ./ σ²ᵤ`, runs a full sparse-sparse add and allocates a new
+matrix every iteration.
+
+### One symbolic factorisation per fit
+
+The sparsity pattern of $\mathbf{C}$ is *constant* across the whole optimisation.
+So `cholesky` runs the fill-reducing analysis once and `cholesky!(F, C)` reuses
+it thereafter, redoing only the $O(\mathrm{nnz}(\mathbf{L}))$ numeric work — for
+every iteration *and* every step-halving retry.
+
+### Measure the ordering; don't trust the folklore
+
+Standard advice says to eliminate dense fixed-effect columns last, to avoid
+catastrophic fill. Measured here, it is worth almost nothing: 98,850 versus
+99,016 nonzeros against CHOLMOD's own AMD [@amd]. `:auto` builds both and keeps
+the sparser factor.
+
+::: {.callout-note}
+## Measure the measurement
+My first implementation reported fixed-effects-last as **8.5× worse** — because
+it was computing fill on a matrix whose values were all still zero. An all-zero
+sparse matrix factorises happily and reports meaningless structure. `_pattern_spd`
+now supplies diagonally dominant values for any symbolic experiment.
+:::
+
+### What was *not* worth doing
+
+`LoopVectorization` and `Octavian` were considered and rejected for the sparse
+core. The Takahashi sweep and MME assembly are irregular gather/scatter —
+memory-bandwidth-bound, not FLOP-bound — and `@turbo` cannot vectorise indirect
+indexing well. `LoopVectorization` is also effectively unmaintained on Julia
+≥1.11, so adopting it would pin the package to 1.10. Careful `@inbounds`,
+column-major CSC access and zero allocation are what actually matter.
+
+---
+
+## Why this is faster than the R packages {#sec-why}
+
+Cross-validated against `nadiv` and `sommer` on identical pedigree datasets:
+
+| animals | sommer | this package | speedup |
+|--------:|-------:|-------------:|--------:|
+|     400 |   1.9 s |     0.042 s |   45× |
+|     800 |  18.2 s |      0.26 s |   72× |
+|   2,000 | 323.1 s |      2.99 s |  108× |
+
+The speedup *grows* with size, which tells you it is complexity, not constants.
+Three reasons, in order of importance.
+
+**1. Sparse $\mathbf{A}^{-1}$ versus dense $\mathbf{A}$.** This is the big one.
+`sommer`'s interface takes `Gu = A` — the relationship matrix itself, dense,
+$O(q^2)$ to store and $O(q^3)$ to factor. We take $\mathbf{A}^{-1}$, which is
+under 1% dense and getting sparser. The cost of one factorisation:
+
+| animals | dense $\mathbf{V}$-style | sparse MME | ratio |
+|--------:|-------:|------:|------:|
+|   400 | 0.0069 s | 0.00029 s |  24× |
+|   800 | 0.0874 s | 0.00093 s |  94× |
+| 1,600 | 0.3236 s | 0.00255 s | 127× |
+| 2,000 | 0.4283 s | 0.00346 s | 124× |
+
+That 24×→124× progression tracks the observed 45×→108× end-to-end speedup
+closely. The rest of the difference is everything below.
+
+**2. Factorisation reuse.** We pay for fill-reducing analysis once per fit. A
+dense implementation has no symbolic phase to amortise, and re-does the full
+$O(q^3)$ decomposition every iteration.
+
+**3. Allocation discipline.** Zero-allocation assembly, a cached selected
+inverse reused by both the score and the EM fallback, and preallocated
+multi-RHS buffers. R's copy-on-modify semantics make this pattern hard to
+achieve.
+
+It is worth being clear about what is *not* the reason. The algorithms are the
+same ones ASReml and BLUPF90 use, and `sommer` implements AI-REML competently.
+Julia versus R matters far less than the data structure: an R package built on
+$\mathbf{A}^{-1}$ and sparse Cholesky (as `pedigreemm` [@pedigreemm] partly is,
+via `lme4`'s sparse machinery) would close most of this gap. **The lesson is
+about representation, not language.**
+
+### The real benchmark: BLUPF90 {#sec-blupf90}
+
+`sommer` is not the toughest opposition, and it would be misleading to stop
+there. **BLUPF90** (`airemlf90`) uses the same data structure and the same
+algorithms as this package — sparse $\mathbf{A}^{-1}$, AI-REML, FSPAK selected
+inversion [@perezenciso1994] — so a comparison against it measures implementation
+quality on a level field:
+
+| animals | BLUPF90 | this package | ratio |
+|--------:|--------:|-------------:|------:|
+|     400 |  0.182 s |     0.047 s | **3.9× faster** |
+|     800 |  0.202 s |     0.282 s | 1.4× slower |
+|   2,000 |  0.517 s |     0.646 s | 1.25× slower |
+
+Roughly at parity: ahead on small pedigrees, slightly behind on larger ones.
+Variance components agree to 2e-5–2e-4 relative.
+
+Getting here took two fixes worth recording, both found by measurement rather
+than reasoning.
+
+**The stopping rule was wasting half the iterations.** It tested only the
+relative change in $\theta$, so a fit that had already converged kept going: at
+$q = 2000$ it ran 12 rounds with *identical* $\theta$ and $-2\log L$ from round 5
+onward. Each of those no-op rounds paid for a full Takahashi sweep. Testing the
+scaled score before proposing a step, plus an objective-drop test after, cut it
+to 6 rounds for the same estimates.
+
+**Half the sweep's runtime was binary search.** A `ProfileToLLM` table put
+`_zget` and its inlined comparison/shift operations at ~50% of total runtime. The
+cause: roughly half of all inner operations take the $k < i$ branch, each
+resolving a lookup by binary search averaging ~8 steps — 80 M search steps at
+$q = 2000$ for a factor with only 148 k nonzeros. Building a row-wise index of
+the result's lower triangle once, by counting sort in $O(\mathrm{nnz})$, makes
+that branch a single array read.
+
+::: {.callout-important}
+## The tempting rewrite that is wrong — twice
+It is natural to reformulate the sweep as a pure scatter: walk each source
+column $k$ once and push its contributions outward. This is *wrong*, because
+column $k$ stores only rows $r \geq k$ and therefore cannot reach a target
+$i < k$. Concretely, for column $j = 3$ with targets $\{6,7,8,10,12\}$, source
+$k = 10$ reaches only $\{10, 12\}$ — the contributions to targets 6, 7 and 8 live
+in *their* columns. I tried this formulation twice; both times it ran ~8× faster
+and was wrong by 4e-5, which still looks like a converged fit. The lesson is to
+check every entry against `inv(Matrix(C))` before believing a speedup.
+:::
+
+**Where BLUPF90 is still ahead.** It converges in 4 rounds to our 5–8, so its
+step control is better. Its per-iteration cost is also flatter with pedigree
+size, which points at FSPAK's selected inversion being a stronger implementation
+than the sweep here. Both are worth revisiting.
+
+ASReml could not be tested: it is commercial software from VSN International, not
+on CRAN (verified), and requires a node-locked licence. If you hold one,
+`bench/R/reference.R` is generic over which R fitter it calls.
+
+---
+
+## Correctness
+
+Every fast path is checked against an independently written reference, never a
+stored number:
+
+| quantity | reference | agreement |
+|---|---|---|
+| inbreeding $F$ | `nadiv::makeAinv` | **exact** (0.0e+00) |
+| $\mathbf{A}^{-1}$ | `nadiv::makeAinv` | 1.8e-15 |
+| $\sigma^2_a, \sigma^2_e$ | `sommer::mmer` | ~5e-6 relative |
+| $\boldsymbol{\beta}$ | `sommer::mmer` | 6 decimal places |
+| $\log L$ | brute-force dense-$\mathbf{V}$ REML in R | 1.0e-08 |
+| $-2\log L$ | dense-$\mathbf{V}$ REML in Julia | machine precision |
+| score, AI matrix | **ForwardDiff** on the dense objective | ~1e-15 |
+| selected inverse | `inv(Matrix(C))` | 1e-17 |
+
+The autodiff check deserves a note. Sparse AD cannot accelerate AI-REML — the
+speed comes from an algebraic identity AD cannot find, and CHOLMOD has no AD
+rule. But ForwardDiff applied to a small *dense* reference objective immediately
+caught two errors in the hand-derived score and AI matrix that both produced
+plausible output. **Autodiff as a test oracle, not a speed path.**
+
+---
+
+## Software using the same algorithms
+
+| package | language | $\mathbf{A}^{-1}$ | REML | selected inverse |
+|---|---|---|---|---|
+| **ASReml** [@asreml] | Fortran (commercial) | Henderson | AI-REML | sparse |
+| **BLUPF90** [@blupf90] | Fortran | Henderson | AI-REML / EM | FSPAK [@perezenciso1994] |
+| **DMU** | Fortran | Henderson | AI-REML | sparse |
+| **sommer** [@sommer] | R/C++ | via dense $\mathbf{A}$ | AI/NR | — |
+| **pedigreemm** [@pedigreemm] | R | Henderson | ML/REML via `lme4` | — |
+| **nadiv** [@nadiv] | R | Henderson | (matrices only) | — |
+| **MixedModels.jl** | Julia | n/a | REML, sparse | — |
+| **this package** | Julia | Henderson + Meuwissen–Luo | AI-REML + EM | Takahashi + Hutchinson |
+
+---
+
+## Reproducing everything
+
+```bash
+julia --project=. -e 'using Pkg; Pkg.test()'   # 86 tests
+julia --project=bench bench/bench.jl           # per-iteration profile
+julia --project=bench bench/compare.jl         # vs MixedModels.jl
+julia --project=bench bench/external.jl        # vs nadiv + sommer
+```
+
+The R comparison needs `install.packages(c("nadiv","sommer"))`. CI runs the
+correctness half on every push and publishes the speed table on demand.
+
+## References
+
+::: {#refs}
+:::

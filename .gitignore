@@ -1,0 +1,16 @@
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+/Manifest.toml
+/bench/Manifest.toml
+/docs/build/
+/docs/Manifest.toml
+.vscode/
+/test/external/Manifest.toml
+/docs/walkthrough_files/
+/docs/.quarto/
+/docs/walkthrough.html
+/CLAUDE.md
+/HANDOVER.md
+/DEVLOG.md
+/LOG.md
