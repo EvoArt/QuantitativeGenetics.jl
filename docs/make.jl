@@ -14,7 +14,7 @@ makedocs(;
         canonical="https://EvoArt.github.io/QuantitativeGenetics.jl",
         repolink="https://github.com/EvoArt/QuantitativeGenetics.jl",
     ),
-    pages=["Home" => "index.md"],
+    pages=["Home" => "index.md", "Example: wheat" => "wheat.md"],
 )
 
 deploydocs(; repo="github.com/EvoArt/QuantitativeGenetics.jl")
