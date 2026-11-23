@@ -6,7 +6,7 @@
 # Requires R on PATH with `nadiv` and `sommer` installed (see bench/R/README.md).
 # Generates one dataset, hands it to R, fits the same data here, and compares.
 
-using QuantitativeGenetics
+using AnimalModels
 using LinearAlgebra, SparseArrays, StableRNGs, DelimitedFiles, Printf
 
 const RSCRIPT = Sys.iswindows() ? "Rscript.exe" : "Rscript"

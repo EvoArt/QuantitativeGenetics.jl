@@ -8,7 +8,7 @@
 # the source comments has a number behind it. Per the house rule: measure,
 # don't assume.
 
-using QuantitativeGenetics
+using AnimalModels
 using LinearAlgebra
 using SparseArrays
 using StableRNGs

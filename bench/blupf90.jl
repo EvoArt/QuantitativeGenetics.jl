@@ -16,7 +16,7 @@
 # beside them — the Intel OpenMP runtime, which ships inside several Julia
 # artifacts (search ~/.julia/artifacts).
 
-using QuantitativeGenetics
+using AnimalModels
 using LinearAlgebra, SparseArrays, StableRNGs, Printf
 
 const BF90_DIR = get(ENV, "BLUPF90_DIR", "")

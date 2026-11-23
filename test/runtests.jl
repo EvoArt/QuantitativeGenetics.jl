@@ -1,4 +1,4 @@
-using QuantitativeGenetics
+using AnimalModels
 using Test
 using LinearAlgebra
 using SparseArrays
@@ -51,7 +51,7 @@ function random_pedigree(rng, q; nfounder=max(5, q ÷ 20))
     return sire, dam
 end
 
-@testset "QuantitativeGenetics" begin
+@testset "AnimalModels" begin
 
     @testset "pedigree: inbreeding and A⁻¹" begin
         # Pedigree with full-sib mating and a repeated ancestor, so several
@@ -103,6 +103,15 @@ end
         Gb = 0.95 .* G .+ 0.05 .* Matrix(I, 40, 40)
         @test Kinv(Kg) ≈ inv(Gb) atol = 1e-8
         @test logdetK(Kg) ≈ logdet(Gb) atol = 1e-8
+
+        # A VanRaden G is singular; the default blend must still factorise it.
+        for (n, m) in ((30, 50), (60, 2000))
+            Gs = genomic_relationship(Float64.(rand(rng, 0:2, n, m)))
+            Kd = GenomicRelatedness(Gs)
+            @test Kinv(Kd) ≈ inv(0.99 .* Gs + 0.01I) rtol = 1e-6
+        end
+        @test_throws ArgumentError GenomicRelatedness([1.0 2.0; 2.0 1.0]; blend=0.0)
+        @test_throws ArgumentError GenomicRelatedness(Matrix(1.0I, 2, 2); blend=2.0)
     end
 
     @testset "MME assembly and factor reuse" begin

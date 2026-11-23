@@ -18,7 +18,7 @@
 #      This is the only way to validate the pedigree path against something
 #      other than itself, and it also demonstrates why the sparse path exists.
 
-using QuantitativeGenetics
+using AnimalModels
 using MixedModels
 using DataFrames
 using StableRNGs

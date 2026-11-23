@@ -5,7 +5,7 @@ environments (Crossa et al. 2010, distributed with the R package BGLR). The line
 inbred, so a marker's presence/absence is a 0/2 dosage.
 
 ```@example wheat
-using QuantitativeGenetics, RData, Statistics, SparseArrays, LinearAlgebra
+using AnimalModels, RData, Statistics, SparseArrays, LinearAlgebra
 import CodecXz, Downloads                      # BGLR's .RData files are xz-compressed
 
 file = joinpath(tempdir(), "wheat.RData")

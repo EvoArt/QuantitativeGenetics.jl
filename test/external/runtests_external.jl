@@ -23,7 +23,7 @@
 # internal convergence metric, which is on a different scale entirely.
 
 using Test
-using QuantitativeGenetics
+using AnimalModels
 using LinearAlgebra, SparseArrays, StableRNGs, DelimitedFiles, Printf
 
 const RSCRIPT = Sys.iswindows() ? "Rscript.exe" : "Rscript"

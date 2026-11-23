@@ -106,17 +106,18 @@ inbreeding(r::PedigreeRelatedness) = r.ped.F
 # --- genomic --------------------------------------------------------------
 
 """
-    GenomicRelatedness(G; blend=0.0, base=I)
+    GenomicRelatedness(G; blend=0.01, base=I)
 
 Genomic relatedness from a genomic relationship matrix `G` (e.g. VanRaden's
 `G = ZZᵀ / 2Σpⱼ(1−pⱼ)`). One dense Cholesky at construction yields both `G⁻¹`
 and `log|G|`, so the REML iteration never touches `G` again.
 
-`blend > 0` uses `(1−blend)·G + blend·base` instead, the standard regularisation
-that keeps `G` invertible when markers make it singular or near-singular. `base`
+`G` is replaced by `(1−blend)·G + blend·base` before factorising. A VanRaden `G`
+is always singular, because centring the marker columns removes one dimension, so
+it needs `blend > 0`; the default is `0.01`, and 0.01–0.05 is typical. `base`
 defaults to the identity (a ridge toward independence); pass the pedigree `A`
-restricted to the genotyped animals to blend toward pedigree instead. On real
-marker data a small blend (0.01–0.05) is usually necessary.
+restricted to the genotyped animals to blend toward pedigree instead. `blend = 0`
+is accepted for a `G` that is already positive definite.
 
 `G⁻¹` is dense, so a genomic random effect makes the corresponding MME diagonal
 block dense. That is intrinsic to GBLUP, not an implementation artifact.
@@ -126,16 +127,19 @@ struct GenomicRelatedness <: AbstractRelatedness
     logdet::Float64
 end
 
-function GenomicRelatedness(G::AbstractMatrix; blend::Real=0.0, base=I)
+function GenomicRelatedness(G::AbstractMatrix; blend::Real=0.01, base=I)
     q = size(G, 1)
     size(G, 2) == q || throw(DimensionMismatch("G must be square, got $(size(G))"))
+    0 <= blend <= 1 || throw(ArgumentError("blend must be in [0, 1], got $blend"))
     Gb = if blend > 0
         basem = base isa UniformScaling ? Matrix{Float64}(base, q, q) : Matrix{Float64}(base)
         (1 - blend) .* Matrix{Float64}(G) .+ blend .* basem
     else
         Matrix{Float64}(G)
     end
-    F = cholesky!(Symmetric(Gb))          # Gb is our own copy; factor in place
+    F = cholesky!(Symmetric(Gb); check=false)   # Gb is our own copy; factor in place
+    issuccess(F) || throw(ArgumentError(
+        "G (after blending with blend=$blend) is not positive definite; use a larger `blend`"))
     ld = logdet(F)                        # log|G| free from the same factor
     Ginv = Matrix(inv(F))
     # Symmetrize: inv() of a Cholesky can leave asymmetry at the 1e-16 level,
@@ -155,7 +159,7 @@ VanRaden method-1 genomic relationship matrix from an `n×p` marker dosage matri
 `M` with entries in `{0,1,2}`. Columns are centred by `2pⱼ` (allele frequencies
 estimated from `M` unless `centered=true`) and scaled by `2Σpⱼ(1−pⱼ)`.
 
-Pass the result to [`GenomicRelatedness`](@ref), typically with a small `blend`.
+Pass the result to [`GenomicRelatedness`](@ref), which blends it toward the identity by default.
 """
 function genomic_relationship(M::AbstractMatrix; centered::Bool=false)
     Mf = Matrix{Float64}(M)

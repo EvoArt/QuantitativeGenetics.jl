@@ -1,17 +1,29 @@
 ```@meta
-CurrentModule = QuantitativeGenetics
+CurrentModule = AnimalModels
 ```
 
-# QuantitativeGenetics.jl
+# AnimalModels.jl
 
-QuantitativeGenetics.jl fits single-trait animal models by average-information restricted maximum likelihood (AI-REML). Random effects can use a pedigree, a genomic relationship matrix, or an identity relationship. The result provides variance components, fixed effects, and predicted breeding values.
+AnimalModels.jl fits single-trait animal models by average-information restricted
+maximum likelihood (AI-REML). A model can have any number of random effects, each
+with its own incidence matrix and relatedness structure: a pedigree, a genomic
+relationship matrix, or the identity for permanent-environment, litter and other
+grouping factors. A fit gives variance components, fixed effects (BLUE) and
+predicted breeding values (BLUP). Runtime dependencies are standard libraries only.
+
+```julia
+using Pkg
+Pkg.add("AnimalModels")
+```
 
 ## Fit a genomic animal model
 
-Rows of `markers` correspond to individuals, columns to markers, and values are allele dosages in `{0, 1, 2}`. This small simulated example supplies one phenotype per individual:
+Rows of `markers` correspond to individuals, columns to markers, and values are
+allele dosages in `{0, 1, 2}`. This small simulated example supplies one phenotype
+per individual:
 
 ```julia
-using QuantitativeGenetics, Random, LinearAlgebra, SparseArrays
+using AnimalModels, Random, LinearAlgebra, SparseArrays
 
 rng = MersenneTwister(42)
 n = 60
@@ -32,10 +44,15 @@ blup(result)                    # predicted breeding values
 heritability(result)            # estimate and standard error
 ```
 
-Inspect `result.converged` before interpreting estimates. For a pedigree model, use `PedigreeRelatedness(sire, dam)` in place of `GenomicRelatedness`; parents must precede offspring and `0` means an unknown parent. See the [algorithm walkthrough](https://github.com/EvoArt/QuantitativeGenetics.jl/blob/master/docs/walkthrough.qmd) for details on the mixed model equations and computation.
+Check `result.converged` before interpreting estimates.
 
-## API reference
+## Where to go next
 
-```@autodocs
-Modules = [QuantitativeGenetics]
-```
+- [Fitting models](@ref) covers pedigree models, several random effects, and the
+  quantities a fit returns.
+- [Example: genomic prediction in wheat](@ref) fits real marker data and checks
+  held-out prediction.
+- [Algorithms](@ref) explains how the fit works and why it is fast.
+- [Performance](@ref) and [Validation](@ref) report timings and agreement with
+  nadiv, sommer, BLUPF90 and MixedModels.jl.
+- The [API reference](@ref) lists every exported function.

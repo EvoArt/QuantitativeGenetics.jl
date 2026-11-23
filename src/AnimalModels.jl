@@ -1,5 +1,5 @@
 """
-    QuantitativeGenetics
+    AnimalModels
 
 Fast quantitative-genetics and genomic-prediction algorithms, built around an
 ASReml-class AI-REML animal model.
@@ -11,7 +11,7 @@ The design priority is speed on the mixed model equations:
   sampling variances.
 - The MME coefficient matrix is assembled by scatter-adding into cached `nzval`
   indices — no sparse arithmetic and no allocation per iteration.
-- The fill-reducing ordering places the dense fixed-effect columns last, and the
+- The fill-reducing ordering is chosen by measuring the candidates, and the
   symbolic factorization is computed once for the entire fit.
 - The average-information matrix reuses that factor via `k+1` right-hand sides,
   so second-order information costs no traces at all.
@@ -20,7 +20,7 @@ The design priority is speed on the mixed model equations:
 
 Entry point: [`fit_reml`](@ref).
 """
-module QuantitativeGenetics
+module AnimalModels
 
 using LinearAlgebra
 using SparseArrays

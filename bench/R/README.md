@@ -13,5 +13,5 @@ julia --project=bench bench/external.jl
 ```
 
 That script generates a shared dataset, runs the R references via `Rscript`,
-fits the same data with QuantitativeGenetics, and prints the comparison. The
+fits the same data with AnimalModels, and prints the comparison. The
 `.R` files here are invoked by it; they are not meant to be run standalone.
