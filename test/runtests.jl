@@ -431,5 +431,54 @@ end
         @test accuracy([0.5], 2.0) ≈ [sqrt(0.75)]
         # show() must not error
         @test occursin("REMLResult", sprint(show, r))
+        @test_throws ArgumentError heritability(r; effect="animal")
+        # a user-supplied start reaches the same optimum
+        r2 = fit_reml(y, X, [RandomEffect(:animal, Z, K)]; start=[1.0, 1.0])
+        @test r2.σ²[1] ≈ r.σ²[1] rtol = 1e-3
+        @test_throws DimensionMismatch fit_reml(y, X, [RandomEffect(:animal, Z, K)]; start=[1.0])
+        # animal_effect is the Z = I shorthand
+        ra = fit_reml(y, X, [animal_effect(:animal, K)])
+        @test ra.σ²[1] ≈ r.σ²[1] rtol = 1e-6
+    end
+
+    @testset "one known parent, centred markers, small helpers" begin
+        # animals with only a sire or only a dam known
+        sire = [0, 0, 1, 0, 3, 1]
+        dam  = [0, 0, 0, 2, 4, 0]
+        ped = Pedigree(sire, dam)
+        A = dense_A(sire, dam)
+        @test Matrix(ainverse(ped)) ≈ inv(A) atol = 1e-10
+        @test logdetA(ped) ≈ logdet(A) atol = 1e-10
+        @test inbreeding(PedigreeRelatedness(sire, dam)) == ped.F
+        # markers already centred
+        rng = StableRNG(17)
+        M = Float64.(rand(rng, 0:2, 20, 60))
+        Zc = M .- mean(M; dims=1)
+        Gc = genomic_relationship(Zc; centered=true)
+        @test size(Gc) == (20, 20) && issymmetric(Symmetric(Gc))
+        @test Gc ≈ Zc * Zc' ./ (2 * sum(fill(0.25, 60)))
+        # selected-inverse entries and the sparse lookups' not-found branches
+        C = sparse([4.0 1.0 0.0; 1.0 3.0 1.0; 0.0 1.0 2.0])
+        si = selected_inverse(C)
+        @test si[2, 2] ≈ inv(Matrix(C))[2, 2]
+        @test AnimalModels._spget(sparse([1.0 0.0; 0.0 1.0]), 2, 1) == 0.0
+        @test AnimalModels._searchrow([1, 3, 5], 1, 3, 4) == 0
+    end
+
+    @testset "EM-REML fallback step is monotone" begin
+        rng = StableRNG(4)
+        q = 60
+        s, d = random_pedigree(rng, q)
+        K = PedigreeRelatedness(s, d)
+        X = ones(q, 1); Z = sparse(1.0I, q, q)
+        y = randn(rng, q) .+ 1
+        rw = REMLWorkspace(build_mme(y, X, [RandomEffect(:animal, Z, K)]), X)
+        for θ in ([0.5, 1.5], [3.0, 0.2])
+            m0 = reml_objective!(rw, y, θ)
+            AnimalModels.reml_gradient_ai!(rw, y, θ)     # leaves the residual at θ, as in fit_reml
+            δ = AnimalModels._em_direction(rw, θ, log.(θ))
+            @test all(isfinite, δ)
+            @test reml_objective!(rw, y, exp.(log.(θ) .+ δ)) <= m0 + 1e-8
+        end
     end
 end

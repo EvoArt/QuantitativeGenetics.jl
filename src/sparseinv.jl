@@ -240,28 +240,6 @@ function _takahashi(LD::SparseMatrixCSC{Float64,Int})
     return Z + transpose(tril(Z, -1))
 end
 
-# Fetch Z[r, c] from the lower-triangular result under construction, using
-# symmetry. Returns 0.0 if the entry is outside the computed pattern — which,
-# by the fill-in containment argument in the header, never happens for entries
-# the recursion actually needs.
-@inline function _zget(colptr::Vector{Int}, rowv::Vector{Int}, zval::Vector{Float64},
-                       r::Int, c::Int)
-    a, b = r >= c ? (r, c) : (c, r)     # lower triangle: row a, column b
-    lo, hi = colptr[b], colptr[b+1] - 1
-    @inbounds while lo <= hi
-        mid = (lo + hi) >>> 1
-        rv = rowv[mid]
-        if rv == a
-            return zval[mid]
-        elseif rv < a
-            lo = mid + 1
-        else
-            hi = mid - 1
-        end
-    end
-    return 0.0
-end
-
 """
     trace_product(s::SelectedInverse, B::SparseMatrixCSC, offset::Int) -> Float64
 
